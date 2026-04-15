@@ -1,6 +1,8 @@
 #Dúvidas — Runner#
 #Última atualização: <!-- data -->#
 
+alguma dúvida aleatória?
+
 ##Em aberto##
 DÚV-001 · <!-- título -->
 Dúvida: <!-- pergunta -->
