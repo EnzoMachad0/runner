@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -319,4 +321,95 @@ func TestGetOrStart_IniciaNovoProcesso(t *testing.T) {
 	if !invoker.IsRunning(port) {
 		t.Error("servidor deveria estar rodando após GetOrStart bem-sucedido")
 	}
+}
+
+// --------------------------------------------------------------------------
+// Testes de Stop e timeout por inatividade
+// --------------------------------------------------------------------------
+
+func TestStop_ProcessoAtivo(t *testing.T) {
+	skipIfNoJar(t)
+	skipIfNoJava(t)
+
+	dir := t.TempDir()
+	defer invoker.SetHubsaudeDir(dir)()
+	defer invoker.SetServerStartTimeout(15 * time.Second)()
+
+	port := freePort(t)
+	if _, err := invoker.GetOrStart(javaExec, testJarPath, port); err != nil {
+		t.Fatalf("GetOrStart: %v", err)
+	}
+
+	info := pidFileInDir(t, dir)
+	result, err := invoker.Stop(port)
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if !result.WasRunning {
+		t.Fatal("Stop deveria indicar que encerrou um processo ativo")
+	}
+	if result.PID != info.PID {
+		t.Errorf("PID retornado = %d, want %d", result.PID, info.PID)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "assinador.pid")); !os.IsNotExist(err) {
+		t.Fatalf("PID file deveria ter sido removido, stat err=%v", err)
+	}
+	if processStillExists(info.PID) {
+		t.Fatalf("processo %d deveria ter sido encerrado", info.PID)
+	}
+}
+
+func TestStop_ProcessoJaEncerrado(t *testing.T) {
+	dir := t.TempDir()
+	defer invoker.SetHubsaudeDir(dir)()
+
+	const pidInexistente = 9999999
+	writeFakePIDFile(t, dir, pidInexistente, 8080)
+
+	result, err := invoker.Stop(8080)
+	if err != nil {
+		t.Fatalf("Stop deveria ser idempotente para processo já encerrado: %v", err)
+	}
+	if result.WasRunning {
+		t.Fatal("Stop não deveria indicar processo ativo para PID inexistente")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "assinador.pid")); !os.IsNotExist(err) {
+		t.Fatalf("PID file deveria ter sido removido, stat err=%v", err)
+	}
+}
+
+func TestStartWithIdleTimeout_DisparaAposInatividade(t *testing.T) {
+	skipIfNoJar(t)
+	skipIfNoJava(t)
+
+	dir := t.TempDir()
+	defer invoker.SetHubsaudeDir(dir)()
+	defer invoker.SetServerStartTimeout(15 * time.Second)()
+
+	port := freePort(t)
+	if _, err := invoker.GetOrStartWithIdleTimeout(javaExec, testJarPath, port, 1500*time.Millisecond); err != nil {
+		t.Fatalf("GetOrStartWithIdleTimeout: %v", err)
+	}
+
+	info := pidFileInDir(t, dir)
+	stopped := pollUntil(6*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "assinador.pid"))
+		return os.IsNotExist(err) && !processStillExists(info.PID)
+	})
+	if !stopped {
+		t.Fatalf("timeout por inatividade não encerrou o processo %d", info.PID)
+	}
+}
+
+func processStillExists(pid int) bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
 }

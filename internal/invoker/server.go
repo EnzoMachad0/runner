@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -22,10 +23,19 @@ var hubsaudeDir string
 
 const pidFileName = "assinador.pid"
 
+var idleMonitors sync.Map
+
 // pidInfo é a estrutura persistida no arquivo PID.
 type pidInfo struct {
 	PID  int `json:"pid"`
 	Port int `json:"port"`
+}
+
+// StopResult descreve o resultado de uma tentativa de parada do servidor.
+type StopResult struct {
+	PID        int
+	Port       int
+	WasRunning bool
 }
 
 // Start inicia o assinador.jar em background como servidor HTTP na porta informada.
@@ -40,6 +50,13 @@ type pidInfo struct {
 //   - ErrJarNotFound  — jarPath não existe
 //   - erros de I/O ao escrever o arquivo PID
 func Start(javaPath, jarPath string, port int) error {
+	return StartWithIdleTimeout(javaPath, jarPath, port, 0)
+}
+
+// StartWithIdleTimeout inicia o assinador.jar e, quando idleTimeout > 0,
+// encerra o processo automaticamente após o período informado sem atividade
+// registrada pelo gerenciador.
+func StartWithIdleTimeout(javaPath, jarPath string, port int, idleTimeout time.Duration) error {
 	// 1. Valida o executável Java.
 	if _, err := exec.LookPath(javaPath); err != nil {
 		return fmt.Errorf("%w: %s", ErrJavaNotFound, javaPath)
@@ -71,6 +88,10 @@ func Start(javaPath, jarPath string, port int) error {
 		// Se não conseguimos salvar o PID, mata o processo e propaga o erro.
 		_ = cmd.Process.Kill()
 		return err
+	}
+
+	if idleTimeout > 0 {
+		go stopAfterIdle(cmd.Process.Pid, port, idleTimeout)
 	}
 
 	return nil
@@ -106,11 +127,17 @@ func IsRunning(port int) bool {
 //  2. Caso contrário, chama Start() e aguarda o servidor ficar pronto.
 //  3. Se o servidor não responder dentro de defaultServerStartTimeout, retorna erro.
 func GetOrStart(javaPath, jarPath string, port int) (int, error) {
+	return GetOrStartWithIdleTimeout(javaPath, jarPath, port, 0)
+}
+
+// GetOrStartWithIdleTimeout é como GetOrStart, mas configura encerramento
+// automático por inatividade quando iniciar uma nova instância.
+func GetOrStartWithIdleTimeout(javaPath, jarPath string, port int, idleTimeout time.Duration) (int, error) {
 	if IsRunning(port) {
 		return port, nil
 	}
 
-	if err := Start(javaPath, jarPath, port); err != nil {
+	if err := StartWithIdleTimeout(javaPath, jarPath, port, idleTimeout); err != nil {
 		return 0, err
 	}
 
@@ -123,6 +150,41 @@ func GetOrStart(javaPath, jarPath string, port int) (int, error) {
 	}
 
 	return port, nil
+}
+
+// Stop encerra o processo registrado em ~/.hubsaude/assinador.pid e remove
+// o arquivo de registro. Quando port > 0, o PID file precisa corresponder à
+// porta informada. A operação é idempotente: processo ausente ou já encerrado
+// retorna WasRunning=false sem erro.
+func Stop(port int) (StopResult, error) {
+	info, err := readPIDFile()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return StopResult{}, nil
+		}
+		return StopResult{}, err
+	}
+
+	result := StopResult{PID: info.PID, Port: info.Port}
+	if port > 0 && info.Port != port {
+		return result, fmt.Errorf(
+			"invoker: servidor registrado na porta %d, não na porta %d",
+			info.Port, port,
+		)
+	}
+
+	if processExists(info.PID) {
+		result.WasRunning = true
+		if err := terminateProcess(info.PID); err != nil {
+			return result, fmt.Errorf("invoker: falha ao encerrar processo %d: %w", info.PID, err)
+		}
+	}
+
+	if err := removePIDFile(); err != nil {
+		return result, err
+	}
+
+	return result, nil
 }
 
 // --------------------------------------------------------------------------
@@ -187,6 +249,20 @@ func readPIDFile() (pidInfo, error) {
 	return info, nil
 }
 
+func removePIDFile() error {
+	base, err := hubsaudeBaseDir()
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(base, pidFileName)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("invoker: falha ao remover PID file em %s: %w", path, err)
+	}
+
+	return nil
+}
+
 // healthCheck faz um GET em http://localhost:<port>/health com timeout curto.
 // Qualquer resposta HTTP (mesmo 4xx) indica que o servidor está de pé.
 // Erro de conexão ou timeout indica que o servidor não está respondendo.
@@ -197,7 +273,11 @@ func healthCheck(port int) bool {
 		return false
 	}
 	resp.Body.Close()
-	return resp.StatusCode < 500
+	ok := resp.StatusCode < 500
+	if ok {
+		recordServerActivity(port)
+	}
+	return ok
 }
 
 // waitForReady faz polling em healthCheck até o servidor responder ou o timeout expirar.
@@ -210,4 +290,48 @@ func waitForReady(port int, timeout time.Duration) bool {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return false
+}
+
+func stopAfterIdle(pid, port int, idleTimeout time.Duration) {
+	reset := make(chan struct{}, 1)
+	idleMonitors.Store(port, reset)
+	defer idleMonitors.Delete(port)
+
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-reset:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idleTimeout)
+		case <-timer.C:
+			info, err := readPIDFile()
+			if err != nil || info.PID != pid || info.Port != port {
+				return
+			}
+			if processExists(pid) {
+				_ = terminateProcess(pid)
+			}
+			_ = removePIDFile()
+			return
+		}
+	}
+}
+
+func recordServerActivity(port int) {
+	value, ok := idleMonitors.Load(port)
+	if !ok {
+		return
+	}
+	reset := value.(chan struct{})
+	select {
+	case reset <- struct{}{}:
+	default:
+	}
 }

@@ -2,7 +2,7 @@
 
 **Projeto:** Trabalho prático — Implementação e Integração (UFG, 2026)
 **Contexto:** SES-GO + UFG — Plataforma HubSaúde de interoperabilidade em saúde
-**Última atualização:** 2026-05-05
+**Última atualização:** 2026-05-13
 
 ---
 
@@ -12,7 +12,7 @@
 |--------|--------|-----------|
 | Sprint 1 | Concluída (base pré-existente) | CLI base, CI/CD, GitHub Releases com Cosign |
 | Sprint 2 | Parcialmente concluída | Assinatura simulada em modo local |
-| Sprint 3 | Parcialmente iniciada | Modo servidor HTTP (US-01.5, US-01.7 prontas) |
+| Sprint 3 | Parcialmente iniciada | Modo servidor HTTP (US-01.5, US-01.7, US-01.8 e timeout da US-01.9 prontos) |
 | Sprint 4 | Pendente | Simulador HubSaúde |
 
 ---
@@ -21,15 +21,15 @@
 
 ```
 # Módulo raiz — github.com/kyriosdata/runner
-ok  github.com/kyriosdata/runner/internal/invoker   1.503s   (20 testes)
-ok  github.com/kyriosdata/runner/internal/jdk       0.031s   (12 testes)
+ok  github.com/kyriosdata/runner/internal/invoker
+ok  github.com/kyriosdata/runner/internal/jdk
 
-# Módulo CLI — github.com/kyriosdata/assinatura
-?   github.com/kyriosdata/assinatura                [no test files]
-ok  github.com/kyriosdata/assinatura/cmd            0.505s   (17 testes + subtestes)
+# Módulo CLI — github.com/kyriosdata/runner/projetos/assinatura
+?   github.com/kyriosdata/runner/projetos/assinatura      [no test files]
+ok  github.com/kyriosdata/runner/projetos/assinatura/cmd
 ```
 
-**Total: 49 testes — todos passando. `go vet ./...` sem warnings em ambos os módulos.**
+**Todos passando em ambos os módulos com `go test ./...`.**
 
 ---
 
@@ -41,19 +41,19 @@ runner/                                        ← raiz do repositório
 ├── internal/
 │   ├── invoker/
 │   │   ├── local.go                           ← US-01.3: invocação local do jar
-│   │   ├── server.go                          ← US-01.5/01.7: modo servidor HTTP
-│   │   ├── platform_unix.go                   ← processExists + detachProcess (Linux/macOS)
-│   │   ├── platform_windows.go                ← stubs para Windows
+│   │   ├── server.go                          ← US-01.5/01.7/01.8/01.9: ciclo de vida do servidor HTTP
+│   │   ├── platform_unix.go                   ← processExists + detachProcess + terminateProcess
+│   │   ├── platform_windows.go                ← processExists + detachProcess + terminateProcess
 │   │   ├── export_test.go                     ← SetHubsaudeDir, SetServerStartTimeout
 │   │   ├── local_test.go                      ← 9 testes (TestMain compartilhado)
-│   │   ├── server_test.go                     ← 11 testes
+│   │   ├── server_test.go                     ← testes de start, health, stop e timeout
 │   │   └── testdata/
 │   │       └── TestJar.java                   ← jar mínimo: echo, fail, sleep, server
 │   └── jdk/
 │       ├── detector.go                        ← US-04.1: DetectJava, DetectLocal, Get
 │       └── detector_test.go                   ← 12 testes
 └── projetos/
-    └── assinatura/                            ← github.com/kyriosdata/assinatura
+    └── assinatura/                            ← github.com/kyriosdata/runner/projetos/assinatura
         ├── go.mod
         ├── main.go
         └── cmd/
@@ -61,6 +61,7 @@ runner/                                        ← raiz do repositório
             ├── version.go
             ├── sign.go                        ← US-01.2: 8 flags FHIR obrigatórias
             ├── validate.go                    ← US-01.2: 6 obrig. + 5 default + 5 opcionais
+            ├── server.go                      ← US-01.8/01.9: start/stop e timeout de inatividade
             └── cli_test.go                    ← 17 testes com os/exec
 ```
 
@@ -185,22 +186,27 @@ nenhum, fallback PATH-velho→local-novo).
 
 ---
 
-### US-01.5 e US-01.7 — Modo servidor HTTP (`internal/invoker/server.go`)
+### US-01.5, US-01.7, US-01.8 e US-01.9 — Modo servidor HTTP
 
 **Módulo:** `github.com/kyriosdata/runner`
 
 Gerencia o ciclo de vida do `assinador.jar` em modo servidor HTTP.
 PID e porta são persistidos em `~/.hubsaude/assinador.pid` (JSON).
+O CLI em `projetos/assinatura/cmd/server.go` expõe os comandos `assinatura start`
+e `assinatura stop [--port <porta>]`.
 
 #### API pública
 
 ```go
 func Start(javaPath, jarPath string, port int) error
+func StartWithIdleTimeout(javaPath, jarPath string, port int, idleTimeout time.Duration) error
 func IsRunning(port int) bool
 func GetOrStart(javaPath, jarPath string, port int) (int, error)
+func GetOrStartWithIdleTimeout(javaPath, jarPath string, port int, idleTimeout time.Duration) (int, error)
+func Stop(port int) (StopResult, error)
 ```
 
-#### `Start()`
+#### `Start()` / `StartWithIdleTimeout()`
 
 1. Valida java (`ErrJavaNotFound`) e jar (`ErrJarNotFound`).
 2. Monta: `java -jar <jarPath> --server --port <port>`.
@@ -208,6 +214,7 @@ func GetOrStart(javaPath, jarPath string, port int) (int, error)
 4. `cmd.Start()` — processo em background, stdout/stderr descartados.
 5. Grava `~/.hubsaude/assinador.pid` com `{"pid": N, "port": P}`.
 6. Se falhar ao gravar, mata o processo e propaga o erro.
+7. Quando `idleTimeout > 0`, inicia goroutine com timer de inatividade.
 
 #### `IsRunning()`
 
@@ -220,12 +227,40 @@ Três verificações em cadeia (curto-circuito no primeiro falso):
 
 `IsRunning` → reutiliza; ou `Start` → `waitForReady` (poll 200ms até `defaultServerStartTimeout` = 30s).
 
+#### `Stop()`
+
+1. Lê `~/.hubsaude/assinador.pid`.
+2. Se `port > 0`, valida que a porta registrada corresponde à solicitada.
+3. Se o processo ainda existe, encerra com `terminateProcess(pid)`.
+4. Remove o arquivo `assinador.pid`.
+5. É idempotente: PID file ausente ou processo já encerrado gera aviso no CLI, sem erro.
+
+#### Timeout por inatividade (`--timeout <minutos>`)
+
+`assinatura start --timeout <minutos>` converte minutos para `time.Duration` e chama
+`GetOrStartWithIdleTimeout`. A goroutine interna usa um `time.Timer`; cada requisição
+observada pelo health check HTTP registra atividade e reseta o timer. Ao expirar, o
+processo é encerrado e o PID file é removido.
+
+`--timeout 0` mantém o comportamento anterior: sem encerramento automático.
+
+#### CLI
+
+```bash
+assinatura start --port 8080 --jar assinador.jar --java java --timeout 10
+assinatura stop
+assinatura stop --port 8080
+```
+
+`assinatura stop` sem `--port` para o processo registrado no PID file. Com `--port`,
+além de parar, valida que o registro pertence à porta informada.
+
 #### Arquivos de plataforma
 
 | Arquivo | Build tag | Conteúdo |
 |---------|-----------|----------|
-| `platform_unix.go` | `!windows` | `processExists` via `syscall.Kill(pid, 0)` + `detachProcess` com `Setsid` |
-| `platform_windows.go` | `windows` | `processExists` via `os.FindProcess` (best-effort) + `detachProcess` no-op |
+| `platform_unix.go` | `!windows` | `processExists` via `syscall.Kill(pid, 0)`, `detachProcess` com `Setsid`, `terminateProcess` com `Kill` + `Wait` |
+| `platform_windows.go` | `windows` | `processExists` via `os.FindProcess` (best-effort), `detachProcess` no-op, `terminateProcess` com `Kill` |
 
 #### `export_test.go`
 
@@ -240,13 +275,15 @@ func SetServerStartTimeout(d time.Duration) func() // acelera testes de GetOrSta
 Responde `HTTP/1.1 200 OK {"status":"ok"}` a qualquer requisição.
 Imprime `server:ready:<port>` ao estar pronto.
 
-#### Testes (`server_test.go`) — 11 testes
+#### Testes (`server_test.go`)
 
 | Grupo | Testes | Estratégia |
 |-------|--------|------------|
 | `TestStart_*` | EscrevePIDFile, ProcessoRodando, JavaNaoEncontrado, JarNaoEncontrado | Java real via TestJar `--server` |
 | `TestIsRunning_*` | ProcessoAtivo, ProcessoMorto, PIDFileAusente, PortaDivergente, ServidorNaoResponde | `httptest.NewServer` Go + PID sintético (sem Java) |
 | `TestGetOrStart_*` | ReutilizaInstanciaAtiva, IniciaNovoProcesso | Híbrido |
+| `TestStop_*` | ProcessoAtivo, ProcessoJaEncerrado | Java real + PID sintético |
+| `TestStartWithIdleTimeout_*` | DisparaAposInatividade | Java real via TestJar + timer curto |
 
 `TestIsRunning_ProcessoAtivo` usa `os.Getpid()` como PID — o processo de teste é o "servidor",
 e um `httptest.NewServer` responde o health check. Rápido e sem JVM.
@@ -272,8 +309,8 @@ e um `httptest.NewServer` responde o health check. Rápido e sem JVM.
 | US-01.5 | `Start()` — iniciar servidor | **Pronto** |
 | US-01.6 | Logs do servidor | Pendente |
 | US-01.7 | `IsRunning()` — health check | **Pronto** |
-| US-01.8 | `Stop()` — parar servidor | Pendente |
-| US-01.9 | `assinatura server start/stop/status` no CLI | Pendente |
+| US-01.8 | `assinatura stop [--port <porta>]` e `Stop()` — parar servidor | **Pronto** |
+| US-01.9 | `--timeout <minutos>` no comando de start, com encerramento por inatividade | **Pronto parcial** — falta `status` |
 | US-02.4 | Endpoint `/sign` no `assinador.jar` | Pendente — Java |
 | US-02.5 | Endpoint `/validate` no `assinador.jar` | Pendente — Java |
 
@@ -289,7 +326,7 @@ e um `httptest.NewServer` responde o health check. Rápido e sem JVM.
 
 | Decisão | Racional |
 |---------|----------|
-| Dois módulos Go (`runner` + `assinatura`) | CLI compilável independente do runner interno; segue layout CLAUDE.md |
+| Dois módulos Go (`runner` + `projetos/assinatura`) | CLI compilável como módulo próprio e, via `replace`, consegue reutilizar `internal/invoker` do módulo raiz |
 | `MarkFlagRequired` para flags obrigatórias | Cobra nomeia a flag ausente automaticamente; `RunE` valida apenas semântica (enum, faixa) |
 | `archive/zip` para criar JAR nos testes | Sem dependência do utilitário `jar` do JDK |
 | `javacFromSameJDK()` | Evita incompatibilidade de class file com múltiplos JDKs |
@@ -298,5 +335,7 @@ e um `httptest.NewServer` responde o health check. Rápido e sem JVM.
 | `export_test.go` com setters de restore | Expõe internos apenas durante `go test`; não polui API de produção |
 | `processExists` em arquivos de plataforma | `syscall.Kill` no Unix; stub no Windows — compila em todas as targets |
 | `detachProcess` com `Setsid: true` | Servidor sobrevive ao encerramento do CLI no Linux/macOS |
+| `Stop` idempotente | `assinatura stop` pode ser repetido sem falhar quando o processo já morreu; remove o registro obsoleto |
+| Timer de inatividade por goroutine | Mantém `Start` simples e adiciona auto-shutdown apenas quando `--timeout` é informado |
 | `ServerSocket` puro no TestJar | Sem APIs internas do JDK (`com.sun.*`); compatível com qualquer JVM >= 8 |
 | `httptest.NewServer` nos testes de `IsRunning` | Testes rápidos sem iniciar JVM — isola a lógica de verificação |

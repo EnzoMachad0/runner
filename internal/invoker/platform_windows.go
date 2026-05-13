@@ -3,6 +3,7 @@
 package invoker
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 )
@@ -27,4 +28,15 @@ func detachProcess(cmd *exec.Cmd) {
 	// CREATE_NEW_PROCESS_GROUP = 0x00000200
 	// Evita que sinais do console se propaguem para o processo filho.
 	cmd.SysProcAttr = nil // sem syscall.SysProcAttr no Windows por padrão
+}
+
+func terminateProcess(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
 }
