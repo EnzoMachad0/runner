@@ -30,3 +30,6 @@ bin/
 .DS_Store
 
 .codex
+.claude
+.idea
+.agents

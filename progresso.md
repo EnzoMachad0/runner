@@ -2,7 +2,7 @@
 
 **Projeto:** Trabalho prático — Implementação e Integração (UFG, 2026)
 **Contexto:** SES-GO + UFG — Plataforma HubSaúde de interoperabilidade em saúde
-**Última atualização:** 2026-05-13
+**Última atualização:** 2026-05-19
 
 ---
 
@@ -11,7 +11,7 @@
 | Sprint | Status | Descrição |
 |--------|--------|-----------|
 | Sprint 1 | Concluída (base pré-existente) | CLI base, CI/CD, GitHub Releases com Cosign |
-| Sprint 2 | Parcialmente concluída | Assinatura simulada em modo local |
+| Sprint 2 | Parcialmente concluída | Assinatura simulada em modo local; `assinador.jar` com modo CLI, validação fail fast e JSON padronizado |
 | Sprint 3 | Parcialmente iniciada | Modo servidor HTTP (US-01.5, US-01.7, US-01.8 e timeout da US-01.9 prontos) |
 | Sprint 4 | Pendente | Simulador HubSaúde |
 
@@ -53,16 +53,26 @@ runner/                                        ← raiz do repositório
 │       ├── detector.go                        ← US-04.1: DetectJava, DetectLocal, Get
 │       └── detector_test.go                   ← 12 testes
 └── projetos/
-    └── assinatura/                            ← github.com/kyriosdata/runner/projetos/assinatura
-        ├── go.mod
-        ├── main.go
-        └── cmd/
-            ├── root.go
-            ├── version.go
-            ├── sign.go                        ← US-01.2: 8 flags FHIR obrigatórias
-            ├── validate.go                    ← US-01.2: 6 obrig. + 5 default + 5 opcionais
-            ├── server.go                      ← US-01.8/01.9: start/stop e timeout de inatividade
-            └── cli_test.go                    ← 17 testes com os/exec
+    ├── assinatura/                            ← github.com/kyriosdata/runner/projetos/assinatura
+    │   ├── go.mod
+    │   ├── main.go
+    │   └── cmd/
+    │       ├── root.go
+    │       ├── version.go
+    │       ├── sign.go                        ← US-01.2: 8 flags FHIR obrigatórias
+    │       ├── validate.go                    ← US-01.2: 6 obrig. + 5 default + 5 opcionais
+    │       ├── server.go                      ← US-01.8/01.9: start/stop e timeout de inatividade
+    │       └── cli_test.go                    ← 17 testes com os/exec
+    └── assinador-java/                        ← US-02.1: modo CLI do assinador.jar
+        ├── pom.xml                            ← módulo Maven Java 21
+        └── src/
+            ├── main/java/com/kyriosdata/assinador/
+            │   ├── Main.java                  ← entrada do JAR executável
+            │   ├── cli/                       ← parser CLI sign/validate
+            │   ├── domain/                    ← requests e response JSON
+            │   ├── service/                   ← SignatureService + FakeSignatureService
+            │   └── validation/                ← US-02.2: validação fail fast
+            └── test/java/.../CliApplicationTest.java
 ```
 
 ---
@@ -290,6 +300,123 @@ e um `httptest.NewServer` responde o health check. Rápido e sem JVM.
 
 ---
 
+### US-02.1 — `assinador.jar` com modo CLI
+
+**Módulo:** `projetos/assinador-java`
+
+Cria o módulo Java/Maven do `assinador.jar` com ponto de entrada executável e comandos
+locais para as operações principais.
+
+#### Comandos aceitos
+
+```bash
+java -jar assinador.jar --help
+java -jar assinador.jar sign --bundle '{}' --provenance '{}' ...
+java -jar assinador.jar validate --jws abc --reference-timestamp 1751328000 ...
+```
+
+#### Comportamento implementado
+
+- `Main` delega para `CliApplication`, permitindo teste sem chamar `System.exit`.
+- `CliApplication` reconhece `sign`, `validate`, `--help` e `-h`.
+- Flags são lidas no formato `--nome valor`.
+- Comando desconhecido, flag desconhecida, flag sem `--` e valor ausente retornam código 2.
+- `sign` cria `SignRequest` e chama `FakeSignatureService.sign`.
+- `validate` cria `ValidateRequest` e chama `FakeSignatureService.validate`.
+- A resposta é emitida em JSON simples no stdout.
+
+### US-02.2 — Validação de parâmetros no Java
+
+**Módulo:** `projetos/assinador-java`
+
+Adiciona validação fail fast antes da resposta simulada do `FakeSignatureService`.
+A CLI captura erros de validação e retorna código 2 com mensagem clara no stderr.
+
+#### Validações do `sign`
+
+- Presença obrigatória de todos os campos FHIR recebidos pelo CLI.
+- `--bundle`: JSON object ou array.
+- `--provenance`: JSON object.
+- `--cryptographic-material`: `PEM`, `PKCS#12`, `SMARTCARD`, `TOKEN` ou `REMOTE`.
+- `--certificates`: JSON object ou array.
+- `--reference-timestamp`: inteiro na faixa `[1751328000, 4102444800]`.
+- `--timestamp-strategy`: `iat` ou `tsa`.
+- `--signature-policy`: formato `{baseUri}|{versão}`.
+- `--operational-configuration`: JSON object.
+
+#### Validações do `validate`
+
+- Presença obrigatória de `--jws`, `--reference-timestamp`, `--signature-policy`,
+  `--trust-store`, `--revocation-policy` e `--ocsp-unknown-handling`.
+- `--reference-timestamp`: inteiro na faixa `[1751328000, 4102444800]`.
+- `--signature-policy`: formato `{baseUri}|{versão}`.
+- `--trust-store`: JSON object ou array.
+- `--revocation-policy`: `strict`, `soft-fail` ou `warn`.
+- `--ocsp-unknown-handling`: `treat-as-revoked` ou `treat-as-warning`.
+- Opcionais numéricos com faixa:
+  `--min-cert-issue-date`, `--ocsp-crl-tsa-timeout`, `--revocation-cache-ttl`,
+  `--near-expiry-threshold-days`, `--signature-age-threshold-days`,
+  `--max-entries-bundle`, `--max-bundle-bytes`, `--bundle-verify-timeout`.
+- `--original-bundle`: JSON object ou array, quando informado.
+- `--original-provenance`: JSON object, quando informado.
+
+#### Testes adicionados
+
+`CliApplicationTest` cobre cenários de erro por parâmetro obrigatório ausente,
+enum inválido, faixa numérica inválida e formato JSON inválido.
+
+---
+
+### US-02.3 — Retorno JSON padronizado pelo JAR
+
+**Módulo:** `projetos/assinador-java`
+
+Padroniza a resposta do `assinador.jar` para sucesso e erro, mantendo um contrato
+único consumível pelo CLI Go na integração local.
+
+#### Contrato de sucesso
+
+```json
+{
+  "success": true,
+  "operation": "sign",
+  "message": "Assinatura simulada gerada com sucesso.",
+  "data": {
+    "signature": "SIMULATED_BASE64_SIGNATURE",
+    "algorithm": "SHA256withRSA",
+    "signedAt": "2026-05-19T22:34:30Z"
+  },
+  "errors": []
+}
+```
+
+#### Contrato de erro
+
+```json
+{
+  "success": false,
+  "operation": "validate",
+  "message": "Valor inválido para --revocation-policy: \"ignore\". Valores aceitos: strict, soft-fail, warn.",
+  "data": {},
+  "errors": [
+    {
+      "field": "revocation-policy",
+      "reason": "invalid-enum"
+    }
+  ]
+}
+```
+
+#### Comportamento implementado
+
+- `SignatureResponse` agora serializa `success`, `operation`, `message`, `data` e `errors`.
+- `ValidationError` representa os itens de erro estruturado com `field` e `reason`.
+- Respostas de sucesso saem no stdout com exit code 0.
+- Erros de parsing/validação dos comandos `sign` e `validate` saem no stderr com exit code 2.
+- A serialização preserva booleanos e números como tipos JSON, não strings.
+
+---
+
 ## O que ainda falta
 
 ### Sprint 2 — Assinatura simulada (modo local)
@@ -298,9 +425,9 @@ e um `httptest.NewServer` responde o health check. Rápido e sem JVM.
 |----------|-----------|--------|
 | US-01.3 integração | Conectar `RunE` de `sign`/`validate` ao `InvokeLocal` | Pendente |
 | US-01.4 | Exibir resultado JSON do jar ao usuário | Pendente |
-| US-02.1 | `assinador.jar` com modo CLI (Picocli/args) | Pendente — Java/Maven |
-| US-02.2 | Validação de parâmetros no Java (fail fast) | Pendente |
-| US-02.3 | Retorno JSON padronizado pelo jar | Pendente |
+| US-02.1 | `assinador.jar` com modo CLI | **Pronto** |
+| US-02.2 | Validação de parâmetros no Java (fail fast) | **Pronto** |
+| US-02.3 | Retorno JSON padronizado pelo jar | **Pronto** |
 
 ### Sprint 3 — Modo servidor HTTP
 
