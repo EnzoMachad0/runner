@@ -8,11 +8,11 @@ import (
 
 // Flags obrigatórias do validate.
 var (
-	validateJWS                string
-	validateReferenceTimestamp int64
-	validateSignaturePolicy    string
-	validateTrustStore         string
-	validateRevocationPolicy   string
+	validateJWS                 string
+	validateReferenceTimestamp  int64
+	validateSignaturePolicy     string
+	validateTrustStore          string
+	validateRevocationPolicy    string
 	validateOCSPUnknownHandling string
 )
 
@@ -27,10 +27,10 @@ var (
 
 // Flags puramente opcionais (sem valor padrão).
 var (
-	validateOriginalBundle    string
-	validateOriginalProvenance string
-	validateMaxEntriesBundle  int
-	validateMaxBundleBytes    int
+	validateOriginalBundle      string
+	validateOriginalProvenance  string
+	validateMaxEntriesBundle    int
+	validateMaxBundleBytes      int
 	validateBundleVerifyTimeout int
 )
 
@@ -87,9 +87,36 @@ Parâmetros opcionais: --original-bundle, --original-provenance,
 			)
 		}
 
-		// TODO (US-01.3): invocar internal/invoker.InvokeLocal com os parâmetros validados.
-		cmd.Println("Parâmetros validados. Invocação do assinador.jar será adicionada na US-01.3.")
-		return nil
+		params := map[string]string{
+			"jws":                          validateJWS,
+			"reference-timestamp":          fmt.Sprintf("%d", validateReferenceTimestamp),
+			"signature-policy":             validateSignaturePolicy,
+			"trust-store":                  validateTrustStore,
+			"revocation-policy":            validateRevocationPolicy,
+			"ocsp-unknown-handling":        validateOCSPUnknownHandling,
+			"min-cert-issue-date":          fmt.Sprintf("%d", validateMinCertIssueDate),
+			"ocsp-crl-tsa-timeout":         fmt.Sprintf("%d", validateOCSPCRLTSATimeout),
+			"revocation-cache-ttl":         fmt.Sprintf("%d", validateRevocationCacheTTL),
+			"near-expiry-threshold-days":   fmt.Sprintf("%d", validateNearExpiryThresholdDays),
+			"signature-age-threshold-days": fmt.Sprintf("%d", validateSignatureAgeDays),
+		}
+		if validateOriginalBundle != "" {
+			params["original-bundle"] = validateOriginalBundle
+		}
+		if validateOriginalProvenance != "" {
+			params["original-provenance"] = validateOriginalProvenance
+		}
+		if validateMaxEntriesBundle > 0 {
+			params["max-entries-bundle"] = fmt.Sprintf("%d", validateMaxEntriesBundle)
+		}
+		if validateMaxBundleBytes > 0 {
+			params["max-bundle-bytes"] = fmt.Sprintf("%d", validateMaxBundleBytes)
+		}
+		if validateBundleVerifyTimeout > 0 {
+			params["bundle-verify-timeout"] = fmt.Sprintf("%d", validateBundleVerifyTimeout)
+		}
+
+		return invokeLocalCommand("validate", params)
 	},
 }
 
@@ -97,6 +124,7 @@ func init() {
 	rootCmd.AddCommand(validateCmd)
 
 	f := validateCmd.Flags()
+	addLocalInvokerFlags(validateCmd)
 
 	// --- Obrigatórias ---
 

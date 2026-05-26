@@ -1,6 +1,10 @@
 package cmd_test
 
 import (
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,12 +87,126 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, exitCode int) 
 	return
 }
 
+func runCLIWithEnv(t *testing.T, env []string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = mergedEnv(env)
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	stdout = outBuf.String()
+	stderr = errBuf.String()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	return
+}
+
+func mergedEnv(overrides []string) []string {
+	values := map[string]string{}
+	order := []string{}
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = entry
+	}
+	for _, entry := range overrides {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := values[key]; !exists {
+			order = append(order, key)
+		}
+		values[key] = entry
+	}
+
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, values[key])
+	}
+	return out
+}
+
 // assertContains falha o teste se s não contém substring.
 func assertContains(t *testing.T, s, substring, label string) {
 	t.Helper()
 	if !strings.Contains(s, substring) {
 		t.Errorf("%s: esperava conter %q\nConteúdo completo:\n%s", label, substring, s)
 	}
+}
+
+func assertOutputContains(t *testing.T, stdout, stderr, substring, label string) {
+	t.Helper()
+	combined := stdout + stderr
+	if !strings.Contains(combined, substring) {
+		t.Errorf("%s: esperava conter %q\nstdout:\n%s\nstderr:\n%s", label, substring, stdout, stderr)
+	}
+}
+
+func fakeInvokerFlags(t *testing.T) []string {
+	t.Helper()
+	dir := t.TempDir()
+
+	jarPath := filepath.Join(dir, "assinador.jar")
+	if err := os.WriteFile(jarPath, []byte("fake jar"), 0644); err != nil {
+		t.Fatalf("não foi possível criar jar falso: %v", err)
+	}
+
+	javaPath := "/bin/echo"
+	if runtime.GOOS == "windows" {
+		javaPath = filepath.Join(dir, "java.bat")
+		content := "@echo off\r\n:loop\r\nif \"%~1\"==\"\" goto end\r\necho %~1\r\nshift\r\ngoto loop\r\n:end\r\n"
+		if err := os.WriteFile(javaPath, []byte(content), 0755); err != nil {
+			t.Fatalf("não foi possível criar java falso: %v", err)
+		}
+	}
+
+	return []string{"--java", javaPath, "--jar", jarPath}
+}
+
+func appendArgs(base []string, extra ...string) []string {
+	out := append([]string{}, base...)
+	return append(out, extra...)
+}
+
+func cliHomeEnv(t *testing.T) []string {
+	t.Helper()
+	return []string{"HOME=" + t.TempDir()}
+}
+
+func writeCLIPIDFile(t *testing.T, home string, pid, port int) {
+	t.Helper()
+	dir := filepath.Join(home, ".hubsaude")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("não foi possível criar diretório .hubsaude: %v", err)
+	}
+	data := []byte(fmt.Sprintf(`{"pid":%d,"port":%d}`, pid, port))
+	if err := os.WriteFile(filepath.Join(dir, "assinador.pid"), data, 0644); err != nil {
+		t.Fatalf("não foi possível criar PID file: %v", err)
+	}
+}
+
+func inProcessCLIHTTPServer(t *testing.T) int {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv.Listener.Addr().(*net.TCPAddr).Port
 }
 
 // ============================================================
@@ -166,8 +284,7 @@ func TestSign_FlagObrigatoriaAusente(t *testing.T) {
 }
 
 func TestSign_TodosParametros_Sucesso(t *testing.T) {
-	_, _, code := runCLI(t,
-		"sign",
+	args := appendArgs([]string{"sign"}, append(fakeInvokerFlags(t),
 		"--bundle", "bundle.json",
 		"--provenance", "prov.json",
 		"--cryptographic-material", "key.pem",
@@ -176,10 +293,13 @@ func TestSign_TodosParametros_Sucesso(t *testing.T) {
 		"--timestamp-strategy", "iat",
 		"--signature-policy", "https://policy.saude.go.gov.br|v1",
 		"--operational-configuration", `{"trustStore":[]}`,
-	)
+	)...)
+	stdout, _, code := runCLI(t, args...)
 	if code != 0 {
 		t.Fatalf("esperava código 0 com todos os parâmetros, obteve %d", code)
 	}
+	assertContains(t, stdout, "sign", "stdout sign sucesso")
+	assertContains(t, stdout, "--bundle", "stdout sign sucesso")
 }
 
 func TestSign_TimestampStrategyInvalido(t *testing.T) {
@@ -220,8 +340,7 @@ func TestSign_TimestampForaDaFaixa(t *testing.T) {
 }
 
 func TestSign_TimestampStrategy_TSA(t *testing.T) {
-	_, _, code := runCLI(t,
-		"sign",
+	_, _, code := runCLI(t, appendArgs([]string{"sign"}, append(fakeInvokerFlags(t),
 		"--bundle", "b.json",
 		"--provenance", "p.json",
 		"--cryptographic-material", "k.pem",
@@ -230,7 +349,7 @@ func TestSign_TimestampStrategy_TSA(t *testing.T) {
 		"--timestamp-strategy", "tsa",
 		"--signature-policy", "uri|v1",
 		"--operational-configuration", "{}",
-	)
+	)...)...)
 	if code != 0 {
 		t.Fatal("--timestamp-strategy=tsa é um valor válido e deveria ser aceito")
 	}
@@ -304,23 +423,23 @@ func TestValidate_FlagObrigatoriaAusente(t *testing.T) {
 }
 
 func TestValidate_TodosParametrosObrigatorios_Sucesso(t *testing.T) {
-	_, _, code := runCLI(t,
-		"validate",
+	stdout, _, code := runCLI(t, appendArgs([]string{"validate"}, append(fakeInvokerFlags(t),
 		"--jws", "base64jws==",
 		"--reference-timestamp", "1751328000",
 		"--signature-policy", "https://policy.saude.go.gov.br|v1",
 		"--trust-store", `["abc123"]`,
 		"--revocation-policy", "strict",
 		"--ocsp-unknown-handling", "treat-as-revoked",
-	)
+	)...)...)
 	if code != 0 {
 		t.Fatalf("esperava código 0 com todos os parâmetros obrigatórios, obteve %d", code)
 	}
+	assertContains(t, stdout, "validate", "stdout validate sucesso")
+	assertContains(t, stdout, "--jws", "stdout validate sucesso")
 }
 
 func TestValidate_ComParametrosOpcionais_Sucesso(t *testing.T) {
-	_, _, code := runCLI(t,
-		"validate",
+	stdout, _, code := runCLI(t, appendArgs([]string{"validate"}, append(fakeInvokerFlags(t),
 		"--jws", "base64jws==",
 		"--reference-timestamp", "1751328000",
 		"--signature-policy", "https://policy.saude.go.gov.br|v1",
@@ -337,10 +456,12 @@ func TestValidate_ComParametrosOpcionais_Sucesso(t *testing.T) {
 		"--max-entries-bundle", "100",
 		"--max-bundle-bytes", "1048576",
 		"--bundle-verify-timeout", "10",
-	)
+	)...)...)
 	if code != 0 {
 		t.Fatalf("esperava código 0 com todos os parâmetros, obteve %d", code)
 	}
+	assertContains(t, stdout, "--original-bundle", "stdout validate opcionais")
+	assertContains(t, stdout, "--max-bundle-bytes", "stdout validate opcionais")
 }
 
 func TestValidate_RevocationPolicyInvalida(t *testing.T) {
@@ -411,4 +532,37 @@ func TestVersion(t *testing.T) {
 		t.Fatalf("version deveria retornar código 0, obteve %d", code)
 	}
 	assertContains(t, stdout, "Assinatura CLI", "version output")
+}
+
+// ============================================================
+// Testes dos comandos de servidor
+// ============================================================
+
+func TestStatus_PIDFileAusente_RetornaInativo(t *testing.T) {
+	env := cliHomeEnv(t)
+	stdout, stderr, code := runCLIWithEnv(t, env, "status", "--port", "8080")
+	if code != 0 {
+		t.Fatalf("status deveria retornar código 0, obteve %d\nstderr: %s", code, stderr)
+	}
+	assertOutputContains(t, stdout, stderr, "Assinador inativo na porta 8080.", "stdout status inativo")
+}
+
+func TestStatus_ProcessoAtivo_RetornaAtivo(t *testing.T) {
+	home := t.TempDir()
+	port := inProcessCLIHTTPServer(t)
+	writeCLIPIDFile(t, home, os.Getpid(), port)
+
+	stdout, stderr, code := runCLIWithEnv(t, []string{"HOME=" + home}, "status", "--port", fmt.Sprint(port))
+	if code != 0 {
+		t.Fatalf("status deveria retornar código 0, obteve %d\nstderr: %s", code, stderr)
+	}
+	assertOutputContains(t, stdout, stderr, fmt.Sprintf("Assinador ativo na porta %d.", port), "stdout status ativo")
+}
+
+func TestStatus_PortaInvalida(t *testing.T) {
+	_, stderr, code := runCLIWithEnv(t, cliHomeEnv(t), "status", "--port", "0")
+	if code == 0 {
+		t.Fatal("esperava falha com --port inválida")
+	}
+	assertContains(t, stderr, "valor inválido para --port", "stderr status porta inválida")
 }

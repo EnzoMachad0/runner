@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -62,9 +63,20 @@ func InvokeLocal(javaPath, jarPath string, params map[string]string) (string, er
 	return InvokeLocalWithTimeout(javaPath, jarPath, params, DefaultTimeout)
 }
 
+// InvokeLocalCommand executa java -jar <jarPath> <command> com os parâmetros
+// convertidos em flags --chave valor. O command é usado pelos modos CLI do
+// assinador.jar, como "sign" e "validate".
+func InvokeLocalCommand(javaPath, jarPath, command string, params map[string]string) (string, error) {
+	return invokeLocal(javaPath, jarPath, command, params, DefaultTimeout)
+}
+
 // InvokeLocalWithTimeout é como InvokeLocal mas aceita um timeout customizado.
 // Útil em testes e em contextos onde o caller controla o prazo.
 func InvokeLocalWithTimeout(javaPath, jarPath string, params map[string]string, timeout time.Duration) (string, error) {
+	return invokeLocal(javaPath, jarPath, "", params, timeout)
+}
+
+func invokeLocal(javaPath, jarPath, command string, params map[string]string, timeout time.Duration) (string, error) {
 	// 1. Verifica o executável Java.
 	if _, err := exec.LookPath(javaPath); err != nil {
 		return "", fmt.Errorf("%w: %s", ErrJavaNotFound, javaPath)
@@ -77,7 +89,16 @@ func InvokeLocalWithTimeout(javaPath, jarPath string, params map[string]string, 
 
 	// 3. Constrói os argumentos: -jar <jarPath> [--chave valor ...]
 	args := []string{"-jar", jarPath}
-	for k, v := range params {
+	if command != "" {
+		args = append(args, command)
+	}
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := params[k]
 		args = append(args, "--"+k, v)
 	}
 

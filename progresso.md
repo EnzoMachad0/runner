@@ -12,7 +12,7 @@
 |--------|--------|-----------|
 | Sprint 1 | Concluída (base pré-existente) | CLI base, CI/CD, GitHub Releases com Cosign |
 | Sprint 2 | Parcialmente concluída | Assinatura simulada em modo local; `assinador.jar` com modo CLI, validação fail fast e JSON padronizado |
-| Sprint 3 | Parcialmente iniciada | Modo servidor HTTP (US-01.5, US-01.7, US-01.8 e timeout da US-01.9 prontos) |
+| Sprint 3 | Parcialmente iniciada | Modo servidor HTTP (US-01.5, US-01.7, US-01.8 e US-01.9 prontos) |
 | Sprint 4 | Pendente | Simulador HubSaúde |
 
 ---
@@ -258,12 +258,17 @@ processo é encerrado e o PID file é removido.
 
 ```bash
 assinatura start --port 8080 --jar assinador.jar --java java --timeout 10
+assinatura status --port 8080
 assinatura stop
 assinatura stop --port 8080
 ```
 
 `assinatura stop` sem `--port` para o processo registrado no PID file. Com `--port`,
 além de parar, valida que o registro pertence à porta informada.
+
+`assinatura status --port 8080` consulta o PID file, confirma que o processo existe
+e executa o health check HTTP para informar se o assinador está ativo ou inativo
+na porta solicitada.
 
 #### Arquivos de plataforma
 
@@ -423,8 +428,8 @@ Padroniza a resposta do `assinador.jar` para sucesso e erro, mantendo um contrat
 
 | História | Descrição | Status |
 |----------|-----------|--------|
-| US-01.3 integração | Conectar `RunE` de `sign`/`validate` ao `InvokeLocal` | Pendente |
-| US-01.4 | Exibir resultado JSON do jar ao usuário | Pendente |
+| US-01.3 integração | Conectar `RunE` de `sign`/`validate` ao `InvokeLocal` | **Pronto** |
+| US-01.4 | Exibir resultado JSON do jar ao usuário | **Pronto parcial** — stdout do JAR já é repassado |
 | US-02.1 | `assinador.jar` com modo CLI | **Pronto** |
 | US-02.2 | Validação de parâmetros no Java (fail fast) | **Pronto** |
 | US-02.3 | Retorno JSON padronizado pelo jar | **Pronto** |
@@ -437,7 +442,7 @@ Padroniza a resposta do `assinador.jar` para sucesso e erro, mantendo um contrat
 | US-01.6 | Logs do servidor | Pendente |
 | US-01.7 | `IsRunning()` — health check | **Pronto** |
 | US-01.8 | `assinatura stop [--port <porta>]` e `Stop()` — parar servidor | **Pronto** |
-| US-01.9 | `--timeout <minutos>` no comando de start, com encerramento por inatividade | **Pronto parcial** — falta `status` |
+| US-01.9 | `--timeout <minutos>` no comando de start, com encerramento por inatividade e `status` | **Pronto** |
 | US-02.4 | Endpoint `/sign` no `assinador.jar` | Pendente — Java |
 | US-02.5 | Endpoint `/validate` no `assinador.jar` | Pendente — Java |
 

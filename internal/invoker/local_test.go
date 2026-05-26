@@ -188,6 +188,29 @@ func TestInvokeLocal_ComParametros(t *testing.T) {
 	}
 }
 
+func TestInvokeLocalCommand_ComComandoEParametros(t *testing.T) {
+	skipIfNoJar(t)
+	skipIfNoJava(t)
+
+	params := map[string]string{
+		"bundle":              "{}",
+		"reference-timestamp": "1751328000",
+	}
+	out, err := invoker.InvokeLocalCommand(javaExec, testJarPath, "sign", params)
+	if err != nil {
+		t.Fatalf("esperava sucesso, obteve: %v", err)
+	}
+	if !strings.Contains(out, "sign") {
+		t.Errorf("saída não contém comando 'sign': %q", out)
+	}
+	if !strings.Contains(out, "--bundle") {
+		t.Errorf("saída não contém flag '--bundle': %q", out)
+	}
+	if !strings.Contains(out, "{}") {
+		t.Errorf("saída não contém valor '{}': %q", out)
+	}
+}
+
 // --------------------------------------------------------------------------
 // Testes de erro: Java não encontrado
 // --------------------------------------------------------------------------

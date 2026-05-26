@@ -14,7 +14,7 @@ assinaturas estão fora do escopo atual.
 | Área | Status | O que funciona |
 |------|--------|----------------|
 | Sprint 1 | Concluída | CLI base, estrutura de release e artefatos assinados pré-existentes |
-| Sprint 2 | Parcial | CLI `assinatura sign/validate`, invoker local, detector de JDK, modo CLI do `assinador.jar`, validação fail fast e JSON padronizado |
+| Sprint 2 | Parcial | CLI `assinatura sign/validate`, invoker local, detector de JDK e modo CLI inicial do `assinador.jar` |
 | Sprint 3 | Parcial | Start/stop do `assinador.jar` em modo servidor, health check e timeout de inatividade |
 | Sprint 4 | Pendente | Simulador HubSaúde completo |
 
@@ -110,15 +110,16 @@ O comando valida:
 
 - flags obrigatórias;
 - `--reference-timestamp` na faixa de 2025-07-01 a 2100-01-01 UTC;
-  - `--revocation-policy`: `strict`, `soft-fail` ou `warn`;
-  - `--ocsp-unknown-handling`: `treat-as-revoked` ou `treat-as-warning`.
+- `--revocation-policy`: `strict`, `soft-fail` ou `warn`;
+- `--ocsp-unknown-handling`: `treat-as-revoked` ou `treat-as-warning`.
 
 ### Comandos de servidor
 
-O CLI já expõe start/stop para gerenciar um `assinador.jar` em modo servidor.
+O CLI já expõe start/stop/status para gerenciar um `assinador.jar` em modo servidor.
 
 ```bash
 go run . start --port 8080 --jar assinador.jar --java java --timeout 10
+go run . status --port 8080
 go run . stop
 go run . stop --port 8080
 ```
@@ -166,9 +167,8 @@ java -jar target/assinador-java-0.1.0-SNAPSHOT.jar validate \
   --ocsp-unknown-handling treat-as-revoked
 ```
 
-O `sign` e o `validate` retornam JSON padronizado no stdout em caso de sucesso.
-Quando um parâmetro está ausente ou inválido, o JAR falha rápido, retorna código
-2 e escreve um JSON padronizado no stderr.
+O `sign` e o `validate` retornam JSON simulado no stdout. A validação rigorosa
+dos campos ainda não foi implementada; ela é a próxima história da Sprint 2.
 
 ## O que já foi implementado
 
@@ -258,27 +258,25 @@ Implementado:
 - `SignatureService`;
 - `FakeSignatureService`;
 - `SignRequest`, `ValidateRequest` e `SignatureResponse`;
-- saída JSON simulada e padronizada com `success`, `operation`, `message`,
-  `data` e `errors`;
-- validação fail fast para parâmetros obrigatórios, enums, faixas numéricas,
-  política de assinatura e formato JSON básico;
-- testes unitários para parsing básico, despacho dos comandos e cenários de
-  validação inválida/erro estruturado.
+- saída JSON simulada;
+- testes unitários para parsing básico e despacho dos comandos.
 
 ## O que ainda não está pronto
 
 - Conectar `assinatura sign` e `assinatura validate` ao `InvokeLocal`.
 - Fazer o CLI Go imprimir o JSON retornado pelo JAR.
+- Implementar validação rigorosa de parâmetros no Java.
+- Padronizar completamente o JSON de sucesso e erro do JAR.
 - Implementar endpoints HTTP reais `/sign` e `/validate` no `assinador.jar`.
 - Implementar logs do servidor.
-- Finalizar o comando `status` do servidor.
 - Implementar o simulador HubSaúde completo.
 
 ## Próxima história recomendada
 
-A próxima história é a **US-01.3 integração: conectar `sign`/`validate` do Go ao `InvokeLocal`**.
+A próxima história é a **US-02.2: validação rigorosa de parâmetros no Java**.
 
 Depois dela, a sequência natural é:
 
-1. US-01.4: exibir o JSON do JAR ao usuário.
-2. US-02.4/US-02.5: implementar endpoints HTTP reais no `assinador.jar`.
+1. US-02.3: retorno JSON padronizado pelo JAR.
+2. US-01.3 integração: conectar `sign`/`validate` do Go ao `InvokeLocal`.
+3. US-01.4: exibir o JSON do JAR ao usuário.

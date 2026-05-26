@@ -14,6 +14,7 @@ var (
 	startJarPath        string
 	startTimeoutMinutes int
 	stopPort            int
+	statusPort          int
 )
 
 var startCmd = &cobra.Command{
@@ -69,9 +70,28 @@ var stopCmd = &cobra.Command{
 	},
 }
 
+var statusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Verifica se o assinador.jar está ativo em modo servidor HTTP",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if statusPort <= 0 || statusPort > 65535 {
+			return fmt.Errorf("valor inválido para --port: %d\nInforme uma porta TCP entre 1 e 65535", statusPort)
+		}
+
+		if invoker.IsRunning(statusPort) {
+			cmd.Printf("Assinador ativo na porta %d.\n", statusPort)
+			return nil
+		}
+
+		cmd.Printf("Assinador inativo na porta %d.\n", statusPort)
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(statusCmd)
 
 	startCmd.Flags().IntVar(&startPort, "port", 8080, "Porta TCP do servidor HTTP")
 	startCmd.Flags().StringVar(&startJavaPath, "java", "java", "Caminho do executável Java")
@@ -79,4 +99,6 @@ func init() {
 	startCmd.Flags().IntVar(&startTimeoutMinutes, "timeout", 0, "Minutos sem requisições antes do encerramento automático; 0 desativa")
 
 	stopCmd.Flags().IntVar(&stopPort, "port", 0, "Porta TCP do servidor HTTP registrado")
+
+	statusCmd.Flags().IntVar(&statusPort, "port", 8080, "Porta TCP do servidor HTTP")
 }

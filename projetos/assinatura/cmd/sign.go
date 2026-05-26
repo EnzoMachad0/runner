@@ -53,9 +53,16 @@ caminho de arquivo (ex.: bundle.json) ou conteúdo JSON direto.`,
 			)
 		}
 
-		// TODO (US-01.3): invocar internal/invoker.InvokeLocal com os parâmetros validados.
-		cmd.Println("Parâmetros validados. Invocação do assinador.jar será adicionada na US-01.3.")
-		return nil
+		return invokeLocalCommand("sign", map[string]string{
+			"bundle":                    signBundle,
+			"provenance":                signProvenance,
+			"cryptographic-material":    signCryptographicMaterial,
+			"certificates":              signCertificates,
+			"reference-timestamp":       fmt.Sprintf("%d", signReferenceTimestamp),
+			"timestamp-strategy":        signTimestampStrategy,
+			"signature-policy":          signSignaturePolicy,
+			"operational-configuration": signOperationalConfig,
+		})
 	},
 }
 
@@ -63,6 +70,7 @@ func init() {
 	rootCmd.AddCommand(signCmd)
 
 	f := signCmd.Flags()
+	addLocalInvokerFlags(signCmd)
 
 	f.StringVar(&signBundle, "bundle", "",
 		"Instância do recurso Bundle FHIR 4.0.1 em JSON\n"+
